@@ -6,6 +6,23 @@ A painting is a TypeScript file in `works/`. Rendering it gives a PNG that Claud
 
 [中文](README.zh-CN.md)
 
+![赶集图 · Market Day](docs/images/003-market-day.jpg)
+
+<table>
+  <tr>
+    <td width="33%"><img src="docs/images/001-someone-is-awake.jpg" alt="有人醒着 · Someone Is Awake"></td>
+    <td width="33%"><img src="docs/images/003-new-friend.jpg" alt="新朋友 · New Friend"></td>
+    <td width="33%"><img src="docs/images/002-the-one-taken.jpg" alt="选中的那一条 · The One Taken"></td>
+  </tr>
+  <tr>
+    <td align="center">有人醒着 · Someone Is Awake</td>
+    <td align="center">新朋友 · New Friend</td>
+    <td align="center">选中的那一条 · The One Taken</td>
+  </tr>
+</table>
+
+Each image is a downscaled `--full` render of the work. `bun paint <work> --full` reproduces it.
+
 ## Commands
 
 ```

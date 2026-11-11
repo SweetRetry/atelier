@@ -6,6 +6,23 @@
 
 [English](README.md)
 
+![赶集图](docs/images/003-market-day.jpg)
+
+<table>
+  <tr>
+    <td width="33%"><img src="docs/images/001-someone-is-awake.jpg" alt="有人醒着"></td>
+    <td width="33%"><img src="docs/images/003-new-friend.jpg" alt="新朋友"></td>
+    <td width="33%"><img src="docs/images/002-the-one-taken.jpg" alt="选中的那一条"></td>
+  </tr>
+  <tr>
+    <td align="center">有人醒着</td>
+    <td align="center">新朋友</td>
+    <td align="center">选中的那一条</td>
+  </tr>
+</table>
+
+每张图都是作品 `--full` 渲染的缩小版。用 `bun paint <作品> --full` 可以重新生成。
+
 ## 常用命令
 
 ```

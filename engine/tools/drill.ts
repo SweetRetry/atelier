@@ -60,7 +60,7 @@ if (mode === "grid") {
   const lum = (d: Uint8ClampedArray, i: number) => (0.2126 * d[i * 4]! + 0.7152 * d[i * 4 + 1]! + 0.0722 * d[i * 4 + 2]!) / 255;
   // Edges of the reference. Each channel is blurred first so paper grain and brush texture do not count as edges,
   // then the strongest channel gradient is taken, so that a warm line on warm skin still counts.
-  const ch = [0, 1, 2].map((c) => {
+  const chans = [0, 1, 2].map((c) => {
     let f: Float32Array = new Float32Array(w * h);
     for (let i = 0; i < w * h; i++) f[i] = rd[i * 4 + c]!;
     for (let k = 0; k < 2; k++) f = boxBlur(f, w, h, 2);
@@ -72,7 +72,7 @@ if (mode === "grid") {
     for (let x = 2; x < w - 2; x++) {
       const i = y * w + x;
       let m = 0;
-      for (const f of ch) m = Math.max(m, Math.hypot(f[i + 2]! - f[i - 2]!, f[i + 2 * w]! - f[i - 2 * w]!));
+      for (const f of chans) m = Math.max(m, Math.hypot(f[i + 2]! - f[i - 2]!, f[i + 2 * w]! - f[i - 2 * w]!));
       if (m > 22) {
         edge[i] = 1;
         edges++;

@@ -39,6 +39,8 @@ bun verify                                  # compare every work's pixels with t
 bun verify --update                         # record the current renders as the baseline
 bun sheet out.png a.png b.png c.png         # tile images into one, to compare side by side
 bun compare 001-name refs/photo.jpg         # reference beside the latest preview, in color and gray
+bun drill grid refs/photo.jpg --crop x,y,w,h  # magnified crop under a labelled pixel grid, for reading positions
+bun drill score 007-name refs/photo.jpg      # score hand-drawn lines against the edges of the image
 bun record 001-name                         # mp4 of the painting being made, mark by mark. needs ffmpeg
 bun run check                               # typecheck
 ```
@@ -56,6 +58,8 @@ Output lands in `out/`. Coordinates are logical units, so a preview and a full r
 | `004-facing-the-light` | 向光 | A girl in profile lifts her face into noon light. Opaque flat-brush paint with colored pencil over it |
 | `005-study-noon-profile` | 临摹 · 逆光侧脸 | A study after a reference image, painted by comparing the sheet with the source before each pass. Practice, not an original |
 | `006-leaf-light` | 叶隙 | An image model made the design (`refs/006-design.png`). The engine only paints it. An experiment in dividing the work |
+| `007-drill-line` | 练习一 · 徒手临线 | A drill, not a picture. The face of `refs/006-design.png` redrawn as named curves typed in by eye, scored with `bun drill score` |
+| `008-lantern-on-the-lake` | 湖上一盏灯 | Watercolor in layers. A small boat on a misty lake at dusk, one vermilion lantern the only warm mark |
 
 `works/000-*.ts` are proof sheets. Each checks one family of engine behaviour.
 
@@ -242,6 +246,7 @@ layer.stroke(ref.trace(x, y, length, rng), { ...media.oil, color: ref.color(x, y
 - `trace` returns a stroke path that follows the form and stops at an edge.
 - `paintFrom(p, layer, ref, passes)` paints a reference by looking. Before each pass it compares the sheet with the reference and puts the brush only where they differ. Strokes follow the form and end where the color drifts, which works on high-key pictures where `trace` and its fixed lightness step of 0.12 do not. `005` and `006` use it.
 - `bun compare <work> <image>` prints two measured numbers with the sheet: `match` (mean color difference) and `ssim` (structure of lightness). They rank renders of one work. They do not replace looking.
+- `bun drill score <work> <image>` scores a hand-drawn line drawing. A drawn pixel is right when an edge of the image lies within 3 pixels. It prints precision, mean distance, and the share of the image that is edge, which is the floor a random line would reach. It scores only what was drawn, not what was left out, and it cannot see faint broken lines or soft color boundaries, so a correct line over those reads as wrong. Where the image is dense with edges, such as lashes, almost any line reads as right, so precision says little there.
 
 ## Extending
 

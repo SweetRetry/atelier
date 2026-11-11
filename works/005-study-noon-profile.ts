@@ -3,7 +3,7 @@
 // Medium: opaque paint with a flat brush for the masses, a fine round point for the drawn line, because the source is flat paint under pencil.
 //
 // This is a study of another artist's picture, made as practice. It is not an original work.
-// Source: examples/cd87cb6c600f9962f30f9d54c68c7775.jpg, watermarked "Xiaohongshu ID: 916722332" as far as it can be read. The watermark is not copied.
+// Source: refs/cd87cb6c600f9962f30f9d54c68c7775.jpg, watermarked "Xiaohongshu ID: 916722332" as far as it can be read. The watermark is not copied.
 //
 // Study of the source (816 x 1456), all measured from the file unless marked.
 // - Crop: a head seen from behind the cheek, facing right, cut by all four edges. Eye at (0.60, 0.21), ear at (0.20, 0.39),
@@ -43,7 +43,7 @@ const PASSES: StudyPass[] = [
 ];
 
 export default async function paint(p: Painting) {
-  const ref = await Reference.load(resolve(import.meta.dir, "../examples/cd87cb6c600f9962f30f9d54c68c7775.jpg"), W, H, 1456);
+  const ref = await Reference.load(resolve(import.meta.dir, "../refs/cd87cb6c600f9962f30f9d54c68c7775.jpg"), W, H, 1456);
   const L = p.wet("paint", { impasto: 0.07, life: 40 });
   L.fill("#f3e6d3");
   paintFrom(p, L, ref, PASSES, { rng: p.rng.fork("hand"), skip: (x, y, size) => size < 60 && inMark(x, y) });

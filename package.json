@@ -1,0 +1,23 @@
+{
+  "name": "atelier",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "paint": "bun engine/tools/cli.ts",
+    "check": "tsc --noEmit",
+    "verify": "bun engine/tools/verify.ts",
+    "sheet": "bun engine/tools/sheet.ts",
+    "record": "bun engine/tools/record.ts"
+  },
+  "dependencies": {
+    "@napi-rs/canvas": "^1.1.0",
+    "culori": "^4.0.2",
+    "perfect-freehand": "^1.2.3",
+    "simplex-noise": "^4.0.3"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.4",
+    "@types/culori": "^4.0.1",
+    "typescript": "^7.0.2"
+  }
+}

@@ -1,4 +1,6 @@
 {
+  "000-cel": "6f221e448265222b",
+  "000-gouache": "1815f2e9b41d833",
   "000-media": "e5d9b4588b8c205",
   "000-proof": "591cfaba6e5885c1",
   "000-reference": "95534f269f0e3f7c",
@@ -8,5 +10,9 @@
   "001-someone-is-awake": "35101a2a6d7f2f17",
   "002-the-one-taken": "f949e086ad9efce0",
   "003-market-day": "a4e2cd50d655e86e",
-  "003-new-friend": "6a9e43d1e5fdf0af"
+  "003-new-friend": "6a9e43d1e5fdf0af",
+  "004-facing-the-light": "cf18768502c9c0f2",
+  "005-study-noon-profile": "162ea99d54169419",
+  "006-leaf-light": "87e044dbcf262f4c",
+  "007-drill-line": "d0059321efd6ffc4"
 }

@@ -7,7 +7,9 @@
     "check": "tsc --noEmit",
     "verify": "bun engine/tools/verify.ts",
     "sheet": "bun engine/tools/sheet.ts",
-    "record": "bun engine/tools/record.ts"
+    "record": "bun engine/tools/record.ts",
+    "compare": "bun engine/tools/compare.ts",
+    "drill": "bun engine/tools/drill.ts"
   },
   "dependencies": {
     "@napi-rs/canvas": "^1.1.0",

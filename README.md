@@ -31,12 +31,14 @@ bun paint 001-name --scale 0.3              # a smaller preview
 bun paint 001-name --crop 800,600,400,300   # zoom into a region, in logical units
 bun paint 001-name --only sky,mist          # isolate layers
 bun paint 001-name --seed 12                # try another variation
+bun paint 001-name --gray                   # lightness only, to check the picture holds by value
 bun paint 001-name --full                   # final render at the work's own resolution
 bun paint 001-name --frames 48              # animation frames, the work reads p.time
 
 bun verify                                  # compare every work's pixels with the baseline
 bun verify --update                         # record the current renders as the baseline
 bun sheet out.png a.png b.png c.png         # tile images into one, to compare side by side
+bun compare 001-name refs/photo.jpg         # reference beside the latest preview, in color and gray
 bun record 001-name                         # mp4 of the painting being made, mark by mark. needs ffmpeg
 bun run check                               # typecheck
 ```
@@ -51,6 +53,9 @@ Output lands in `out/`. Coordinates are logical units, so a preview and a full r
 | `002-the-one-taken` | 选中的那一条 | A branching tree in grey ink, one path in vermilion |
 | `003-market-day` | 赶集图 | An old town on market day in ruled-line oblique view, about 430 generated figures, on aged silk |
 | `003-new-friend` | 新朋友 | A ragdoll cat meets the little Claude crab, with the Claude spark on the wall |
+| `004-facing-the-light` | 向光 | A girl in profile lifts her face into noon light. Opaque flat-brush paint with colored pencil over it |
+| `005-study-noon-profile` | 临摹 · 逆光侧脸 | A study after a reference image, painted by comparing the sheet with the source before each pass. Practice, not an original |
+| `006-leaf-light` | 叶隙 | An image model made the design (`refs/006-design.png`). The engine only paints it. An experiment in dividing the work |
 
 `works/000-*.ts` are proof sheets. Each checks one family of engine behaviour.
 
@@ -61,6 +66,8 @@ Output lands in `out/`. Coordinates are logical units, so a preview and a full r
 | `000-media` | Dry media. Pencil, charcoal, pastel and paper tooth |
 | `000-water` | Watercolor. Dark rims, wet in wet, glazing, blooms, granulation |
 | `000-space` | Camera, lighting, cast shadows, depth blur, lettering |
+| `000-gouache` | Opaque paint with a flat brush. Flat tip, tapering, clipping, blocking in, pencil over paint |
+| `000-cel` | The `lock` brush and `bloom` |
 | `000-reference` | Painting from a reference. It reads `out/001-someone-is-awake@full.png`, so render that first |
 
 ## Stack
@@ -89,9 +96,9 @@ engine/
     water.ts            watercolor layer
   brushes/            brushes for canvas layers
     registry.ts         what a brush is, and the table of brushes
-    builtin.ts          round, ink, dry, wash, stamp
+    builtin.ts          round, ink, dry, wash, stamp, lock
     tips.ts             textured tips. sponge, chalk, speckle
-  effects.ts          whole-image passes. grain, vignette, silk
+  effects.ts          whole-image passes. grain, vignette, silk, bloom
   camera.ts           pinhole camera, lighting, ground shadows
   reference.ts        sampling a reference image
   tools/              command line. cli, verify, sheet, record
@@ -142,6 +149,7 @@ A control point is `[x, y, pressure]`, pressure optional. Take randomness from `
 | `dry` | Separate bristles that run out of paint | Grass, wood grain, glints on water |
 | `wash` | Stacked deformed translucent films | Quick washes, mist |
 | `stamp` | Textured tips, rotated and scattered | Mottling, foliage, grit, spatter |
+| `lock` | A flat tapered shape with a drawn edge. Pressure is its width, `tip` grades the fill, `sides` picks which edges get a line | Cel hair, petals, ribbons |
 
 `stamp` takes a `tip`, one of `sponge`, `chalk`, `speckle`.
 
@@ -171,6 +179,22 @@ oil.dry();
 
 Stroke options are `load` (paint on the brush), `pickup` (how readily it takes up wet paint), `hardness`, `bristle` (depth of streaks), `reach` (how far the load lasts), and `tooth` (resistance of the paper).
 
+### Opaque paint with a flat brush
+
+```ts
+const pt = p.wet("paint", { impasto: 0.1 });
+pt.block(shape, { ...media.gouache, color, size: 150, angle: -0.9, vary: 0.006 });   // lay a shape in
+pt.dry();
+pt.clip(shape, () => pt.block(shadow, { ...media.gouache, color: shade, size: 110, feather: 6 }));
+pt.stroke(pts, { ...media.gouache, color, size: 160, thin: 1, fade: 0.1 });          // one lock of hair
+```
+
+- `tip: "flat"` is a chisel edge held across the stroke. Marks have straight sides and square ends. `aspect` is its thickness.
+- `thin` is how much pressure narrows the mark. At 1 it closes to a point. `fade` is how much pressure lightens it. `thin: 1, fade: 0` is a tapered mark that stays opaque.
+- `clip(poly, fn, feather)` confines strokes to a shape, as masking film does. Nested clips intersect.
+- `block(poly, opts)` fills a shape with parallel strokes of uneven length and slightly varied tone, cut to its edge. The inside keeps brush marks and the outline stays clean.
+- For line over paint, use a second wet layer with `media.pencil`. It is transparent where nothing is drawn.
+
 ### Dry media
 
 Pencil, charcoal and pastel are wet-layer strokes with `tooth` set. The whole painting shares one paper height field. Light pressure touches only the peaks, heavy pressure reaches the valleys.
@@ -182,7 +206,7 @@ d.stroke(pts, { ...media.charcoal, color: coal, size: 46 });
 d.smudge(pts, { size: 80, strength: 0.8 });
 ```
 
-`life: Infinity` keeps the marks smudgeable. `media` has five presets, `oil`, `knife`, `pencil`, `charcoal`, `pastel`.
+`life: Infinity` keeps the marks smudgeable. `media` has six presets, `oil`, `knife`, `gouache`, `pencil`, `charcoal`, `pastel`.
 
 ## Watercolor layer
 
@@ -216,6 +240,8 @@ layer.stroke(ref.trace(x, y, length, rng), { ...media.oil, color: ref.color(x, y
 - `along` is the direction forms run in. It comes from a structure tensor, so thin lines keep their orientation.
 - `detail` says how much is going on. Small strokes belong where it is high.
 - `trace` returns a stroke path that follows the form and stops at an edge.
+- `paintFrom(p, layer, ref, passes)` paints a reference by looking. Before each pass it compares the sheet with the reference and puts the brush only where they differ. Strokes follow the form and end where the color drifts, which works on high-key pictures where `trace` and its fixed lightness step of 0.12 do not. `005` and `006` use it.
+- `bun compare <work> <image>` prints two measured numbers with the sheet: `match` (mean color difference) and `ssim` (structure of lightness). They rank renders of one work. They do not replace looking.
 
 ## Extending
 
@@ -233,7 +259,10 @@ After changing the engine, run `bun verify`. Every work reporting `same` means n
 
 - **Mixtures of several colors go grey and dark.** The pigment model has three bands. Fixing it needs a spectral model, at two to three times the memory per pixel.
 - **The wet layer is memory hungry.** Ten floats per pixel, about 290MB at 2400×3000.
-- **Wet-layer strokes end softly.**
+- **Round-tip wet strokes end softly.** A flat tip ends square.
+- **A `lock` shows a notch inside a tight bend.** The edge is offset from the centerline, and it folds where the bend is tighter than half the width.
+- **`block` leaves a faint grid.** Strokes are parallel and evenly stepped, so at high `vary` the patches read as tiles. Keep `vary` under about 0.015 (a guess from one painting).
+- **Figure drawing is by coordinates.** A face is placed point by point in code. The engine has no construction aid for heads, so 004 is a schematic profile.
 - **Watercolor blooms are faint.** Visible, but without the crisp cauliflower edge real paper gives.
 - **Very small shapes stay loose when painting from a reference.**
 - **No vector output.** Wet, watercolor and tooth-aware layers are pixel simulations.

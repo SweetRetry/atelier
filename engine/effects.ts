@@ -1,3 +1,4 @@
+import { boxBlur } from "./core/field.ts";
 import type { Effect } from "./painting.ts";
 
 /** Paper tooth plus fine speckle. Breaks the digital flatness of the final image. */
@@ -50,6 +51,22 @@ export function silk(amount = 0.05, thread = 3.2): Effect {
         d[i] = d[i]! * k;
         d[i + 1] = d[i + 1]! * k;
         d[i + 2] = d[i + 2]! * k;
+      }
+    }
+  };
+}
+
+/** Light spilling out of the brightest areas. Everything above the threshold is blurred and screened back on. Radius in logical units. */
+export function bloom(strength = 0.5, radius = 40, threshold = 0.75): Effect {
+  return (d, w, h, p) => {
+    const R = Math.max(1, Math.round((radius * p.scale) / 2));
+    for (let c = 0; c < 3; c++) {
+      let f: Float32Array = new Float32Array(w * h);
+      for (let i = 0; i < f.length; i++) f[i] = Math.max(0, d[i * 4 + c]! / 255 - threshold) / (1 - threshold);
+      for (let k = 0; k < 3; k++) f = boxBlur(f, w, h, R);
+      for (let i = 0; i < f.length; i++) {
+        const v = d[i * 4 + c]! / 255;
+        d[i * 4 + c] = (1 - (1 - v) * (1 - strength * f[i]!)) * 255;
       }
     }
   };

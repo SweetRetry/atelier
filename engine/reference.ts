@@ -4,6 +4,8 @@ import { createCanvas, loadImage } from "@napi-rs/canvas";
 import { boxBlur } from "./core/field.ts";
 import type { Pt } from "./core/path.ts";
 import type { Rng } from "./core/rng.ts";
+import { media, type WetLayer } from "./layers/wet.ts";
+import type { Painting } from "./painting.ts";
 
 export class Reference {
   private constructor(
@@ -121,5 +123,92 @@ export class Reference {
     }
     if (pts.length < 2) pts.push([x + Math.cos(a) * step * 0.5, y + Math.sin(a) * step * 0.5, 0.8]);
     return pts;
+  }
+}
+
+/** One pass of paintFrom: brush size, attempts, stroke length in sizes, how far the color may drift along a stroke (0..255), least error worth a stroke (0..255), pickup. */
+export type StudyPass = [size: number, attempts: number, length: number, drift: number, floor: number, pickup: number];
+
+type RGB = [number, number, number];
+const hexRgb = (h: string): RGB => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+const dist = (a: RGB, b: RGB) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+
+/**
+ * Paint a reference onto a wet layer by looking. Before each pass the sheet is compared with the reference,
+ * and the brush goes only where the two still differ, most often where they differ most.
+ * Each stroke follows the form in the reference both ways from where it lands and ends where the color drifts.
+ * Passes run from a broad flat brush to a fine point. Sizes under 10 use a round point, for line.
+ */
+export function paintFrom(p: Painting, L: WetLayer, ref: Reference, passes: StudyPass[], o: { rng?: Rng; skip?: (x: number, y: number, size: number) => boolean } = {}) {
+  const [W, H] = [p.width, p.height];
+  const r = o.rng ?? p.rng.fork("paintFrom");
+  const col = (x: number, y: number) => hexRgb(ref.color(x, y));
+  // The sheet as it stands, sampled on a grid of G logical units, as distance from the reference.
+  const G = 4;
+  const gw = Math.ceil(W / G);
+  const gh = Math.ceil(H / G);
+  const look = () => {
+    const d = L.canvas.getContext("2d").getImageData(0, 0, p.pxW, p.pxH).data;
+    const e = new Float32Array(gw * gh);
+    for (let gy = 0; gy < gh; gy++) {
+      for (let gx = 0; gx < gw; gx++) {
+        const [x, y] = [(gx + 0.5) * G, (gy + 0.5) * G];
+        const i = (Math.min(p.pxH - 1, Math.floor(y * p.scale)) * p.pxW + Math.min(p.pxW - 1, Math.floor(x * p.scale))) * 4;
+        e[gy * gw + gx] = dist([d[i]!, d[i + 1]!, d[i + 2]!], col(x, y));
+      }
+    }
+    return e;
+  };
+  const follow = (x: number, y: number, length: number, size: number, tol: number): Pt[] => {
+    const c0 = col(x, y);
+    const step = Math.max(2, size * 0.5);
+    const directed = (qx: number, qy: number) => ref.detail(qx, qy) > 0.03 && ref.coherence(qx, qy) > 0.25;
+    const a0 = directed(x, y) ? ref.along(x, y) : -0.95 + r.gauss(0, 0.5);
+    const arm = (a: number): Pt[] => {
+      const out: Pt[] = [];
+      let [qx, qy] = [x, y];
+      for (let s = step; s <= length / 2; s += step) {
+        qx += Math.cos(a) * step;
+        qy += Math.sin(a) * step;
+        if (qx < -size || qy < -size || qx > W + size || qy > H + size) break;
+        if (dist(col(qx, qy), c0) > tol) break;
+        out.push([qx, qy, 1]);
+        if (directed(qx, qy)) {
+          let n = ref.along(qx, qy);
+          if (Math.cos(n - a) < 0) n += Math.PI;
+          a = n;
+        }
+      }
+      return out;
+    };
+    const back = arm(a0 + Math.PI).reverse();
+    const fwd = arm(a0);
+    const pts: Pt[] = [...back, [x, y, 1], ...fwd];
+    if (pts.length < 2) pts.push([x + Math.cos(a0) * step, y + Math.sin(a0) * step, 1]);
+    // A lifted end, so marks do not stop like cut tape.
+    pts[0]![2] = 0.6;
+    pts[pts.length - 1]![2] = 0.6;
+    return pts;
+  };
+  for (const [size, attempts, len, tol, floor, pickup] of passes) {
+    L.dry();
+    const e = look();
+    const fine = size < 10;
+    const tip = fine ? { load: 0.85, pickup: 0, bristle: 0.08, hardness: 0.75, thin: 0.5, fade: 0.3 } : { ...media.gouache, bristle: 0.25, pickup, thin: 0.35, fade: 0.2 };
+    for (let i = 0; i < attempts; i++) {
+      const x = r.float(0, W);
+      const y = r.float(0, H);
+      const err = e[Math.min(gh - 1, Math.floor(y / G)) * gw + Math.min(gw - 1, Math.floor(x / G))]!;
+      if (err < floor || err < r.float(0, 40)) continue;
+      if (o.skip?.(x, y, size)) continue;
+      // A broad brush is loaded with the average of what lies under it, not with one pixel of the reference.
+      let color = ref.color(x, y);
+      if (!fine) {
+        const q = size / 4;
+        const cs = [col(x, y), col(x - q, y), col(x + q, y), col(x, y - q), col(x, y + q)];
+        color = `#${[0, 1, 2].map((c) => Math.round(cs.reduce((t, v) => t + v[c]!, 0) / 5).toString(16).padStart(2, "0")).join("")}`;
+      }
+      L.stroke(follow(x, y, size * len, size, tol), { ...tip, color, size });
+    }
   }
 }

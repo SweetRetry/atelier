@@ -1,4 +1,5 @@
-// bun paint <work> [--full] [--scale n] [--seed n] [--crop x,y,w,h] [--only a,b] [--out file] [--t 0..1] [--frames n]
+// bun paint <work> [--full] [--scale n] [--seed n] [--crop x,y,w,h] [--only a,b] [--out file] [--gray] [--t 0..1] [--frames n]
+// --gray shows lightness only, to judge whether the picture holds together by value before color.
 // --frames renders an animation as numbered PNGs into out/<work>-frames/. The work reads p.time.
 // Preview fits the long edge to 1400px. --crop is in logical units and renders that region at 1400px.
 import { createCanvas } from "@napi-rs/canvas";
@@ -57,6 +58,15 @@ if (crop) {
   c.getContext("2d").drawImage(canvas, -x, -y);
   canvas = c;
 }
+if (args.includes("--gray")) {
+  const g = canvas.getContext("2d");
+  const img = g.getImageData(0, 0, canvas.width, canvas.height);
+  for (let i = 0; i < img.data.length; i += 4) {
+    const v = 0.2126 * img.data[i]! + 0.7152 * img.data[i + 1]! + 0.0722 * img.data[i + 2]!;
+    img.data[i] = img.data[i + 1] = img.data[i + 2] = v;
+  }
+  g.putImageData(img, 0, 0);
+}
 const t2 = performance.now();
 
 const tag = [
@@ -64,6 +74,7 @@ const tag = [
   flag("seed") ? `-s${seed}` : "",
   crop ? "-crop" : "",
   flag("only") ? `-${flag("only")}` : "",
+  args.includes("--gray") ? "-gray" : "",
 ].join("");
 const out = flag("out") ? resolve(flag("out")!) : resolve(root, "out", `${id}${tag}.png`);
 mkdirSync(dirname(out), { recursive: true });

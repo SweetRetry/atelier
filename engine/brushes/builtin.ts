@@ -223,3 +223,55 @@ defineBrush("stamp", {
     }
   },
 });
+
+// ---------- lock: a flat tapered shape with a drawn edge. Cel hair, ribbons, petals, folds. ----------
+
+defineBrush("lock", {
+  spacing: 0.04,
+  defaults: {
+    color: "#d8c9a8",
+    /** Width in logical units where pressure is 1. Pressure scales it linearly, so 0 closes the shape to a point. */
+    size: 80,
+    opacity: 1,
+    /** Color at the far end. The fill grades from color to this along the stroke. */
+    tip: "",
+    /** Color of the drawn edge. Empty leaves the shape unlined. */
+    line: "",
+    lineSize: 3,
+    /** Which edges get a line: "both", "a" (left of travel) or "b" (right of travel). */
+    sides: "both",
+  },
+  draw({ ctx }, path, o) {
+    if (path.length < 3) return;
+    const a: number[][] = [];
+    const b: number[][] = [];
+    for (const s of path) {
+      const hw = (o.size * s.p) / 2;
+      const nx = -Math.sin(s.a);
+      const ny = Math.cos(s.a);
+      a.push([s.x - nx * hw, s.y - ny * hw]);
+      b.push([s.x + nx * hw, s.y + ny * hw]);
+    }
+    ctx.beginPath();
+    a.forEach(([x, y], i) => (i ? ctx.lineTo(x!, y!) : ctx.moveTo(x!, y!)));
+    for (let i = b.length - 1; i >= 0; i--) ctx.lineTo(b[i]![0]!, b[i]![1]!);
+    ctx.closePath();
+    if (o.tip) {
+      const s0 = path[0]!;
+      const s1 = path[path.length - 1]!;
+      const g = ctx.createLinearGradient(s0.x, s0.y, s1.x, s1.y);
+      g.addColorStop(0, rgba(o.color, o.opacity));
+      g.addColorStop(1, rgba(o.tip, o.opacity));
+      ctx.fillStyle = g;
+    } else ctx.fillStyle = rgba(o.color, o.opacity);
+    ctx.fill();
+    if (!o.line) return;
+    ctx.fillStyle = rgba(o.line, 1);
+    for (const edge of o.sides === "a" ? [a] : o.sides === "b" ? [b] : [a, b]) {
+      // The line swells in the middle and dies at both ends, like a pen lifted off the paper.
+      const pts = edge.map(([x, y], i) => ({ x: x!, y: y!, p: 0.15 + 0.85 * Math.sin((Math.PI * i) / (edge.length - 1)) ** 0.7 }) as Sample);
+      tracePoly(ctx, ribbon(pts, o.lineSize, 0.75));
+      ctx.fill();
+    }
+  },
+});

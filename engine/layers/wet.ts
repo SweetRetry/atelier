@@ -5,7 +5,8 @@
 // The brush carries a row of bristle reservoirs. Each dab picks up wet paint under it and lays down what it carries,
 // so strokes drag, blend and streak. Over dry paint a loaded stroke simply covers, which gives occlusion for free.
 import { type Canvas, createCanvas } from "@napi-rs/canvas";
-import { type Color, rgb } from "../core/color.ts";
+import { type Color, rgb, shift } from "../core/color.ts";
+import { boxBlur } from "../core/field.ts";
 import type { Painting } from "../painting.ts";
 import { type Pt, spline, taper } from "../core/path.ts";
 import { ksDec, ksEnc, linToByte, toLin } from "../core/pigment.ts";
@@ -38,12 +39,30 @@ export interface WetStroke {
   /** How much the paper tooth resists the mark, 0..1. 0 is fluid paint. High values skip over the valleys, as pencil and charcoal do. */
   tooth?: number;
   taper?: [number, number];
+  /** Shape of the brush. "round" is a disc. "flat" is a chisel edge held across the stroke, so marks have straight sides and square ends. */
+  tip?: "round" | "flat";
+  /** Thickness of a flat tip along the stroke, as a fraction of size. */
+  aspect?: number;
+  /** How much pressure narrows the mark, 0..1. At 1 the mark closes to a point where pressure reaches 0. */
+  thin?: number;
+  /** How much pressure lightens the mark, 0..1. At 0 a narrowing mark stays fully loaded to its point. */
+  fade?: number;
+}
+
+export interface BlockOpts extends WetStroke {
+  /** Direction the brush travels, radians. */
+  angle?: number;
+  /** Lightness drift from stroke to stroke, in OKLCH lightness. Hue drifts with it. */
+  vary?: number;
+  /** Softness of the shape's edge, in logical units. 0 is cut with a knife. */
+  feather?: number;
 }
 
 /** Starting points for common media. Spread one into a stroke and override what you need. */
 export const media = {
   oil: { load: 0.8, pickup: 0.6, bristle: 0.6, hardness: 0.8 },
   knife: { load: 0.95, pickup: 0.3, bristle: 0.05, hardness: 0.95 },
+  gouache: { load: 0.93, pickup: 0.25, bristle: 0.22, hardness: 0.9, tip: "flat", aspect: 0.3 },
   pencil: { load: 0.4, pickup: 0, bristle: 0, hardness: 0.7, tooth: 0.8 },
   charcoal: { load: 0.65, pickup: 0.15, bristle: 0.35, hardness: 0.45, tooth: 0.95 },
   pastel: { load: 0.9, pickup: 0.1, bristle: 0.2, hardness: 0.6, tooth: 0.65 },
@@ -68,6 +87,7 @@ export class WetLayer {
   private pigment: boolean;
   private life: number;
   private impasto: number;
+  private maskA?: Float32Array;
 
   constructor(readonly name: string, private p: Painting, o: WetOpts = {}) {
     this.w = p.pxW;
@@ -137,6 +157,62 @@ export class WetLayer {
     return this;
   }
 
+  /** Run fn with every stroke confined to a polygon, as with masking film. Nested clips intersect. Feather softens the edge, in logical units. */
+  clip(poly: Pt[], fn: () => void, feather = 0): this {
+    const c = createCanvas(this.w, this.h);
+    const g = c.getContext("2d");
+    g.scale(this.p.scale, this.p.scale);
+    g.beginPath();
+    poly.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y)));
+    g.closePath();
+    g.fill();
+    const d = g.getImageData(0, 0, this.w, this.h).data;
+    let m: Float32Array = new Float32Array(this.w * this.h);
+    for (let i = 0; i < m.length; i++) m[i] = d[i * 4 + 3]! / 255;
+    const R = Math.round((feather * this.p.scale) / 2);
+    if (R >= 1) m = boxBlur(boxBlur(m, this.w, this.h, R), this.w, this.h, R);
+    const prev = this.maskA;
+    if (prev) for (let i = 0; i < m.length; i++) m[i] = m[i]! * prev[i]!;
+    this.maskA = m;
+    fn();
+    this.maskA = prev;
+    return this;
+  }
+
+  /** Lay a shape in with the brush: parallel strokes of uneven length across the polygon, cut to its edge. The inside keeps the marks, the outline stays clean. */
+  block(poly: Pt[], o: BlockOpts): this {
+    const rng = this.p.rng.fork(`${this.name}/block${this.now}`);
+    const xs = poly.map((q) => q[0]);
+    const ys = poly.map((q) => q[1]);
+    const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+    const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+    const rad = Math.hypot(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)) / 2 + o.size;
+    const a = o.angle ?? 0;
+    const [tx, ty, nx, ny] = [Math.cos(a), Math.sin(a), -Math.sin(a), Math.cos(a)];
+    const inside = (x: number, y: number) => x > Math.min(...xs) - o.size && x < Math.max(...xs) + o.size && y > Math.min(...ys) - o.size && y < Math.max(...ys) + o.size;
+    const { angle: _a, vary, feather, ...stroke } = o;
+    return this.clip(
+      poly,
+      () => {
+        for (let v = -rad; v <= rad; v += o.size * 0.55) {
+          let u = -rad - rng.float(0, o.size * 2);
+          while (u < rad) {
+            const len = o.size * rng.float(1.6, 4.5);
+            const bow = rng.gauss(0, o.size * 0.12);
+            const pt = (t: number, off: number): Pt => [cx + tx * (u + len * t) + nx * (v + off), cy + ty * (u + len * t) + ny * (v + off)];
+            const pts = [pt(0, 0), pt(0.5, bow), pt(1, 0)];
+            if (pts.some(([x, y]) => inside(x, y))) {
+              const color = vary && o.color ? shift(o.color, { l: rng.gauss(0, vary), h: rng.gauss(0, vary * 80) }) : o.color;
+              this.stroke(pts, { ...stroke, color });
+            }
+            u += len * rng.float(0.55, 0.9);
+          }
+        }
+      },
+      feather ?? 0,
+    );
+  }
+
   /** A clean brush dragged through the paint. */
   smudge(pts: Pt[], o: { size: number; strength?: number; hardness?: number; bristle?: number; taper?: [number, number] }): this {
     return this.stroke(pts, { ...o, load: 0, pickup: o.strength ?? 0.8 });
@@ -175,7 +251,13 @@ export class WetLayer {
       amount[b] = load > 0 ? rng.float(0.75, 1) : 0;
       has[b] = load > 0 ? 1 : 0;
     }
-    const flow = 1 - (1 - load) ** (spacingFrac * 3);
+    const flat = o.tip === "flat";
+    const aspect = o.aspect ?? 0.3;
+    const thin = o.thin ?? 0.55;
+    const fade = o.fade ?? 1;
+    // A flat tip passes over each point in fewer dabs than a disc does, so each dab lays down more.
+    const flow = 1 - (1 - load) ** (flat ? (spacingFrac * 3) / aspect : spacingFrac * 3);
+    const mask = this.maskA;
     const deplete = o.reach && Number.isFinite(o.reach) ? spacingFrac / o.reach : 0;
     const acc = new Float64Array(BINS * 4);
     const macc = new Float64Array(BINS);
@@ -191,17 +273,23 @@ export class WetLayer {
     const paper = tooth ? this.p.tooth : undefined;
 
     for (const sm of path) {
-      const R = (o.size / 2) * s * (0.45 + 0.55 * sm.p);
+      const R = (o.size / 2) * s * (1 - thin + thin * sm.p);
       if (R < 0.4) continue;
       const cx = sm.x * s;
       const cy = sm.y * s;
       const nx = -Math.sin(sm.a) / R;
       const ny = Math.cos(sm.a) / R;
       const R2 = R * R;
-      const x0 = Math.max(0, Math.floor(cx - R));
-      const x1 = Math.min(w - 1, Math.ceil(cx + R));
-      const y0 = Math.max(0, Math.floor(cy - R));
-      const y1 = Math.min(h - 1, Math.ceil(cy + R));
+      // Half thickness of a flat tip along the direction of travel. Never thinner than a pixel, and never thinner than
+      // the step between dabs, or a mark that narrows to a point breaks into separate bars.
+      const T = Math.max(1, R * aspect, o.size * spacingFrac * s);
+      const tx = Math.cos(sm.a) / T;
+      const ty = Math.sin(sm.a) / T;
+      const E = flat ? Math.hypot(R, T) : R;
+      const x0 = Math.max(0, Math.floor(cx - E));
+      const x1 = Math.min(w - 1, Math.ceil(cx + E));
+      const y0 = Math.max(0, Math.floor(cy - E));
+      const y1 = Math.min(h - 1, Math.ceil(cy + E));
       acc.fill(0);
       macc.fill(0);
       taken.fill(0);
@@ -212,17 +300,28 @@ export class WetLayer {
         const dy = y + 0.5 - cy;
         for (let x = x0; x <= x1; x++) {
           const dx = x + 0.5 - cx;
-          const d2 = dx * dx + dy * dy;
-          if (d2 >= R2) continue;
-          const rr = Math.sqrt(d2 / R2);
+          const across = dx * nx + dy * ny;
+          let rr: number;
+          let along = 1;
+          if (flat) {
+            const va = dx * tx + dy * ty;
+            rr = Math.abs(across);
+            if (rr >= 1 || va >= 1 || va <= -1) continue;
+            along = 1 - va * va;
+          } else {
+            const d2 = dx * dx + dy * dy;
+            if (d2 >= R2) continue;
+            rr = Math.sqrt(d2 / R2);
+          }
           let fall = rr < hard ? 1 : 1 - (rr - hard) / (1 - hard);
-          fall *= fall;
-          const u = (dx * nx + dy * ny + 1) * 0.5;
+          fall *= fall * along;
+          const u = (across + 1) * 0.5;
           const bin = Math.min(BINS - 1, (u * BINS) | 0);
           const f = fine[Math.min(FINE - 1, (u * FINE) | 0)]!;
-          const m = fall * sm.p * (1 - bristle * (1 - f));
-          if (m < 0.004) continue;
           const i = y * w + x;
+          let m = fall * (1 - fade * (1 - sm.p)) * (1 - bristle * (1 - f));
+          if (mask) m *= mask[i]!;
+          if (m < 0.004) continue;
           const i3 = i * 3;
           const b3 = bin * 3;
           let a = wc[i]!;

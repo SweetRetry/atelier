@@ -19,5 +19,8 @@ A painting engine built for Claude, and the paintings made with it. `README.md` 
 bun paint <work> [--scale n] [--crop x,y,w,h] [--only a,b] [--seed n] [--full]
 bun verify [--update]
 bun sheet out.png a.png b.png
+bun compare <work> <reference image> [--crop fx,fy,fw,fh]
 bun run check
 ```
+
+To make or revise a painting, follow the `paint` skill in `.claude/skills/paint/SKILL.md`.

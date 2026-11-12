@@ -1,6 +1,7 @@
 // The painting: one sheet with a seed, a paper, a stack of layers and a list of finishing effects.
 import { type Canvas, createCanvas } from "@napi-rs/canvas";
 import { type Color, rgba } from "./core/color.ts";
+import { type Area, Mask } from "./core/mask.ts";
 import { makeNoise, type Noise, Rng } from "./core/rng.ts";
 import { Layer } from "./layers/canvas.ts";
 import { WaterLayer, type WaterOpts } from "./layers/water.ts";
@@ -28,7 +29,8 @@ export class Painting {
   tick(weight = 1) {
     this.onTick?.(weight);
   }
-  background: Color = "#ffffff";
+  /** Color of the sheet. `null` is no sheet at all: the PNG keeps its transparency, for marks and stickers. */
+  background: Color | null = "#ffffff";
   /** Size of the paper tooth in logical units. Set before the first stroke that uses it. */
   toothSize = 2.4;
   private toothField?: Float32Array;
@@ -89,6 +91,23 @@ export class Painting {
     return this.obtain(WaterLayer, name, () => new WaterLayer(name, this, o), o);
   }
 
+  /**
+   * A mask over the sheet. From a polygon, from several polygons (inner ones are holes), from a layer (where it is painted),
+   * or from a function of logical position returning 0..1. Feather softens the edge, in logical units.
+   * `within` limits a function to a box (x, y, w, h), so a costly one is not asked about the whole sheet.
+   */
+  mask(src: Area | AnyLayer | ((x: number, y: number) => number | boolean), feather = 0, within?: [x: number, y: number, w: number, h: number]): Mask {
+    const m =
+      src instanceof Mask
+        ? src
+        : typeof src === "function"
+          ? Mask.fn(src, this.pxW, this.pxH, this.scale, within)
+          : Array.isArray(src)
+            ? Mask.poly(src, this.pxW, this.pxH, this.scale)
+            : Mask.alpha(src.canvas, this.scale);
+    return m.feather(feather);
+  }
+
   post(e: Effect): this {
     this.effects.push(e);
     return this;
@@ -98,8 +117,10 @@ export class Painting {
   composite(only?: string[]): Canvas {
     const out = createCanvas(this.pxW, this.pxH);
     const ctx = out.getContext("2d");
-    ctx.fillStyle = rgba(this.background);
-    ctx.fillRect(0, 0, this.pxW, this.pxH);
+    if (this.background !== null) {
+      ctx.fillStyle = rgba(this.background);
+      ctx.fillRect(0, 0, this.pxW, this.pxH);
+    }
     for (const l of this.layers) {
       if (only && !only.includes(l.name)) continue;
       ctx.globalAlpha = l.opacity;

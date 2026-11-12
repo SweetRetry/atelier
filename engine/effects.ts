@@ -1,4 +1,6 @@
+import { fromOklab, toOklab } from "./core/color.ts";
 import { boxBlur } from "./core/field.ts";
+import { linToByte, toLin } from "./core/pigment.ts";
 import type { Effect } from "./painting.ts";
 
 /** Paper tooth plus fine speckle. Breaks the digital flatness of the final image. */
@@ -70,4 +72,42 @@ export function bloom(strength = 0.5, radius = 40, threshold = 0.75): Effect {
       }
     }
   };
+}
+
+export interface Levels {
+  /** Lightness range of the picture as it is, 0..100, the scale `bun measure` prints. */
+  from?: [number, number];
+  /** Where that range should land. `from: [73, 96], to: [50, 96]` deepens the darks and keeps the lights. */
+  to?: [number, number];
+  /** Bends the middle. Above 1 darkens the midtones, below 1 lightens them. */
+  gamma?: number;
+  /** Multiplies colorfulness. 0 is grey. */
+  chroma?: number;
+  /** Turns every hue, in degrees. */
+  hue?: number;
+}
+
+/** Lightness on the 0..100 scale of `bun measure` as OKLab lightness, exact for greys. */
+const okL = (v: number) => Math.cbrt(v > 8 ? ((v + 16) / 116) ** 3 : v / 903.3);
+
+/** Remap lightness, chroma and hue of pixels in place. Hue and chroma of each pixel are kept while its lightness moves. Alpha is untouched. */
+export function adjust(d: Uint8ClampedArray, o: Levels): void {
+  const [f0, f1] = (o.from ?? [0, 100]).map(okL) as [number, number];
+  const [t0, t1] = (o.to ?? [0, 100]).map(okL) as [number, number];
+  const [gamma, chroma] = [o.gamma ?? 1, o.chroma ?? 1];
+  const [ch, sh] = [Math.cos(((o.hue ?? 0) * Math.PI) / 180) * chroma, Math.sin(((o.hue ?? 0) * Math.PI) / 180) * chroma];
+  for (let i = 0; i < d.length; i += 4) {
+    if (!d[i + 3]) continue;
+    const [L, a, b] = toOklab(toLin(d[i]! / 255), toLin(d[i + 1]! / 255), toLin(d[i + 2]! / 255));
+    const t = Math.min(1, Math.max(0, (L - f0) / (f1 - f0)));
+    const [r, g, bl] = fromOklab(t0 + (t1 - t0) * (gamma === 1 ? t : t ** gamma), a * ch - b * sh, a * sh + b * ch);
+    d[i] = linToByte(r);
+    d[i + 1] = linToByte(g);
+    d[i + 2] = linToByte(bl);
+  }
+}
+
+/** Adjust the values and color of the whole picture. Measure first, then say where the range should go. */
+export function levels(o: Levels): Effect {
+  return (d) => adjust(d, o);
 }

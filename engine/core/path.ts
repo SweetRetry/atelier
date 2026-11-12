@@ -133,3 +133,127 @@ export function inPoly(poly: Pt[], x: number, y: number): boolean {
   }
   return inside;
 }
+
+/** An ellipse as a polygon, optionally turned by `rot` radians. With one radius it is a circle. */
+export function oval(cx: number, cy: number, rx: number, ry = rx, rot = 0, n = 64): Pt[] {
+  const [c, s] = [Math.cos(rot), Math.sin(rot)];
+  return Array.from({ length: n }, (_, i): Pt => {
+    const [x, y] = [rx * Math.cos((i / n) * Math.PI * 2), ry * Math.sin((i / n) * Math.PI * 2)];
+    return [cx + x * c - y * s, cy + x * s + y * c];
+  });
+}
+
+/** A rectangle from corner to corner as a polygon. `r` rounds the corners. */
+export function rect(x0: number, y0: number, x1: number, y1: number, r = 0): Pt[] {
+  if (r <= 0) return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+  r = Math.min(r, Math.abs(x1 - x0) / 2, Math.abs(y1 - y0) / 2);
+  const out: Pt[] = [];
+  const corners: [number, number, number][] = [[x1 - r, y0 + r, -0.5], [x1 - r, y1 - r, 0], [x0 + r, y1 - r, 0.5], [x0 + r, y0 + r, 1]];
+  for (const [cx, cy, a0] of corners) for (let k = 0; k <= 8; k++) out.push([cx + r * Math.cos((a0 + k / 16) * Math.PI), cy + r * Math.sin((a0 + k / 16) * Math.PI)]);
+  return out;
+}
+
+/** Where a group of points sits: moved to x, y, scaled by s (about the local origin), turned by rot radians, mirrored left to right by flip. */
+export interface Placement {
+  x?: number;
+  y?: number;
+  s?: number;
+  rot?: number;
+  flip?: boolean;
+}
+
+/**
+ * Draw a part in its own coordinates and put it on the sheet with one transform. Pressure is kept.
+ * Fix a proportion or move a whole figure by changing the placement, not every point. Placements nest: place(a)(place(b)(pts)).
+ */
+export function place(at: Placement): (pts: Pt[]) => Pt[] {
+  const k = at.s ?? 1;
+  const [c, s] = [Math.cos(at.rot ?? 0) * k, Math.sin(at.rot ?? 0) * k];
+  const f = at.flip ? -1 : 1;
+  return (pts) =>
+    pts.map(([x, y, pr]): Pt => {
+      const q: Pt = [(at.x ?? 0) + f * x * c - y * s, (at.y ?? 0) + f * x * s + y * c];
+      if (pr !== undefined) q.push(pr);
+      return q;
+    });
+}
+
+/** The convex outline around a set of points, counter-clockwise on the sheet. */
+export function hull(pts: Pt[]): Pt[] {
+  const p = [...pts].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  if (p.length < 3) return p;
+  const cross = (o: Pt, a: Pt, b: Pt) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const half = (src: Pt[]) => {
+    const h: Pt[] = [];
+    for (const q of src) {
+      while (h.length >= 2 && cross(h[h.length - 2]!, h[h.length - 1]!, q) <= 0) h.pop();
+      h.push(q);
+    }
+    h.pop();
+    return h;
+  };
+  return [...half(p), ...half(p.reverse())];
+}
+
+/** Douglas-Peucker on a closed ring: keep only the corners that stand more than `tol` off the line between kept corners. */
+export function facet(ring: Pt[], tol: number): Pt[] {
+  let far = 0;
+  for (let i = 1; i < ring.length; i++) if (Math.hypot(ring[i]![0]! - ring[0]![0]!, ring[i]![1]! - ring[0]![1]!) > Math.hypot(ring[far]![0]! - ring[0]![0]!, ring[far]![1]! - ring[0]![1]!)) far = i;
+  const keep = new Uint8Array(ring.length + 1);
+  const at = (i: number) => ring[i % ring.length]!;
+  const stack: [number, number][] = [[0, far], [far, ring.length]];
+  keep[0] = keep[far] = 1;
+  while (stack.length) {
+    const [a, b] = stack.pop()!;
+    const [ax, ay, bx, by] = [at(a)[0]!, at(a)[1]!, at(b)[0]!, at(b)[1]!];
+    const len = Math.hypot(bx - ax, by - ay) || 1;
+    let [m, md] = [-1, tol];
+    for (let i = a + 1; i < b; i++) {
+      const d = Math.abs((at(i)[0]! - ax) * (by - ay) - (at(i)[1]! - ay) * (bx - ax)) / len;
+      if (d > md) [m, md] = [i, d];
+    }
+    if (m < 0) continue;
+    keep[m] = 1;
+    stack.push([a, m], [m, b]);
+  }
+  return ring.filter((_, i) => keep[i]);
+}
+
+/** A placement as one transform: what it does to points, to sizes and to directions. Layers use it for `at`. */
+export interface Xf {
+  /** x' = a x + c y + e, y' = b x + d y + f. */
+  m: [a: number, b: number, c: number, d: number, e: number, f: number];
+  pts(pts: Pt[]): Pt[];
+  /** How much lengths grow. */
+  k: number;
+  /** A direction in radians, carried through the turn and the mirror. */
+  angle(a: number): number;
+}
+
+/** The transform of a placement. Given `outer`, the placement happens inside it, as nested groups do. */
+export function affine(at: Placement, outer?: Xf): Xf {
+  const k = at.s ?? 1;
+  const [c, s, f] = [Math.cos(at.rot ?? 0) * k, Math.sin(at.rot ?? 0) * k, at.flip ? -1 : 1];
+  let m: Xf["m"] = [f * c, f * s, -s, c, at.x ?? 0, at.y ?? 0];
+  if (outer) {
+    const [A, B, C, D, E, F] = outer.m;
+    m = [A * m[0] + C * m[1], B * m[0] + D * m[1], A * m[2] + C * m[3], B * m[2] + D * m[3], A * m[4] + C * m[5] + E, B * m[4] + D * m[5] + F];
+  }
+  return {
+    m,
+    k: Math.sqrt(Math.abs(m[0] * m[3] - m[1] * m[2])),
+    pts: (pts) =>
+      pts.map(([x, y, pr]): Pt => {
+        const q: Pt = [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
+        if (pr !== undefined) q.push(pr);
+        return q;
+      }),
+    angle: (a) => Math.atan2(m[1] * Math.cos(a) + m[3] * Math.sin(a), m[0] * Math.cos(a) + m[2] * Math.sin(a)),
+  };
+}
+
+/** An area carried through a transform. Polygons move. A mask is already in sheet coordinates and stays. */
+export function moved<T>(area: T, xf?: Xf): T {
+  if (!xf || !Array.isArray(area)) return area;
+  return (typeof area[0]?.[0] === "number" ? xf.pts(area as Pt[]) : (area as Pt[][]).map((q) => xf.pts(q))) as T;
+}

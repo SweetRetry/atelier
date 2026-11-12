@@ -2,7 +2,7 @@
 // so strokes can follow what is there instead of coordinates worked out by hand.
 import { createCanvas, loadImage } from "@napi-rs/canvas";
 import { boxBlur } from "./core/field.ts";
-import type { Pt } from "./core/path.ts";
+import { facet, type Pt } from "./core/path.ts";
 import type { Rng } from "./core/rng.ts";
 import { media, type WetLayer } from "./layers/wet.ts";
 import type { Painting } from "./painting.ts";
@@ -123,6 +123,158 @@ export class Reference {
     }
     if (pts.length < 2) pts.push([x + Math.cos(a) * step * 0.5, y + Math.sin(a) * step * 0.5, 0.8]);
     return pts;
+  }
+
+  /**
+   * The image as flat patches: each run of one color is one polygon with a faceted outline, largest first.
+   * Fill them in order with `layer.shape` and every boundary is a single hard line, which strokes laid side by side cannot give.
+   * `colors` is the palette size, `min` the smallest patch kept (logical area), `facet` how far an edge may leave the true outline (logical units).
+   * `inside` limits the work to part of the sheet, for cutting a figure from its backdrop.
+   */
+  planes(o: { rng: Rng; colors?: number; min?: number; facet?: number; inside?: (x: number, y: number) => boolean }): { poly: Pt[]; color: string; area: number }[] {
+    const [w, h, px] = [this.w, this.h, this.px];
+    const n = w * h;
+    const inside = new Uint8Array(n);
+    for (let i = 0; i < n; i++) inside[i] = !o.inside || o.inside(((i % w) + 0.5) / this.k, (Math.floor(i / w) + 0.5) / this.k) ? 1 : 0;
+    const [min, tol] = [(o.min ?? 60) * this.k * this.k, (o.facet ?? 4) * this.k];
+    // 1. Palette by k-means over the marked pixels.
+    const idx: number[] = [];
+    for (let i = 0; i < n; i += 3) if (inside[i]) idx.push(i);
+    const colors = o.colors ?? 16;
+    const cen = Array.from({ length: colors }, () => {
+      const i = idx[Math.floor(o.rng.float(0, idx.length))]!;
+      return [px[i * 4]!, px[i * 4 + 1]!, px[i * 4 + 2]!];
+    });
+    const nearest = (i: number) => {
+      let [best, bd] = [0, Infinity];
+      for (let k = 0; k < cen.length; k++) {
+        const c = cen[k]!;
+        const d = (px[i * 4]! - c[0]!) ** 2 + (px[i * 4 + 1]! - c[1]!) ** 2 + (px[i * 4 + 2]! - c[2]!) ** 2;
+        if (d < bd) [best, bd] = [k, d];
+      }
+      return best;
+    };
+    for (let it = 0; it < 10; it++) {
+      const sum = cen.map(() => [0, 0, 0, 0]);
+      for (const i of idx) {
+        const s = sum[nearest(i)]!;
+        s[0]! += px[i * 4]!;
+        s[1]! += px[i * 4 + 1]!;
+        s[2]! += px[i * 4 + 2]!;
+        s[3]!++;
+      }
+      sum.forEach((s, k) => s[3] && (cen[k] = [s[0]! / s[3]!, s[1]! / s[3]!, s[2]! / s[3]!]));
+    }
+    // 2. Label map, then a 3x3 majority vote twice to drop speckle. 255 is outside.
+    let lab = new Uint8Array(n).fill(255);
+    for (let i = 0; i < n; i++) if (inside[i]) lab[i] = nearest(i);
+    for (let it = 0; it < 2; it++) {
+      const out = lab.slice();
+      const cnt = new Uint16Array(256);
+      for (let y = 1; y < h - 1; y++) {
+        for (let x = 1; x < w - 1; x++) {
+          const i = y * w + x;
+          if (lab[i] === 255) continue;
+          cnt.fill(0);
+          let [best, bc] = [lab[i]!, 0];
+          for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+            const l = lab[i + dy * w + dx]!;
+            if (l === 255) continue;
+            if (++cnt[l]! > bc) [best, bc] = [l, cnt[l]!];
+          }
+          if (bc >= 5) out[i] = best;
+        }
+      }
+      lab = out;
+    }
+    // 3. Connected patches. Patches under `min` take the label of their most common neighbour, then patches are found again.
+    const comp = new Int32Array(n);
+    let sizes: number[] = [];
+    const find = () => {
+      comp.fill(-1);
+      sizes = [];
+      const stack: number[] = [];
+      for (let s = 0; s < n; s++) {
+        if (lab[s] === 255 || comp[s] !== -1) continue;
+        const id = sizes.length;
+        let a = 0;
+        stack.push(s);
+        comp[s] = id;
+        while (stack.length) {
+          const i = stack.pop()!;
+          a++;
+          const x = i % w;
+          for (const j of [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, i - w, i + w]) {
+            if (j < 0 || j >= n || comp[j] !== -1 || lab[j] !== lab[s]) continue;
+            comp[j] = id;
+            stack.push(j);
+          }
+        }
+        sizes.push(a);
+      }
+    };
+    for (let it = 0; it < 3; it++) {
+      find();
+      const votes = new Map<number, Map<number, number>>();
+      for (let i = 0; i < n; i++) {
+        const c = comp[i]!;
+        if (c < 0 || sizes[c]! >= min) continue;
+        const x = i % w;
+        for (const j of [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, i - w, i + w]) {
+          if (j < 0 || j >= n || lab[j] === 255 || comp[j] === c) continue;
+          const v = votes.get(c) ?? votes.set(c, new Map()).get(c)!;
+          v.set(lab[j]!, (v.get(lab[j]!) ?? 0) + 1);
+        }
+      }
+      if (!votes.size) break;
+      const to = new Map<number, number>();
+      for (const [c, v] of votes) to.set(c, [...v].sort((a, b) => b[1] - a[1])[0]![0]);
+      for (let i = 0; i < n; i++) {
+        const t = to.get(comp[i]!);
+        if (t !== undefined) lab[i] = t;
+      }
+    }
+    find();
+    // 4. Outline of each patch, walked along pixel edges with the patch on the right, then cut down to facets.
+    const first = new Int32Array(sizes.length).fill(-1);
+    const sum = sizes.map(() => [0, 0, 0]);
+    for (let i = 0; i < n; i++) {
+      const c = comp[i]!;
+      if (c < 0) continue;
+      if (first[c] === -1) first[c] = i;
+      const s = sum[c]!;
+      s[0]! += px[i * 4]!;
+      s[1]! += px[i * 4 + 1]!;
+      s[2]! += px[i * 4 + 2]!;
+    }
+    const out: { poly: Pt[]; color: string; area: number }[] = [];
+    for (let c = 0; c < sizes.length; c++) {
+      if (sizes[c]! < min) continue;
+      const isIn = (x: number, y: number) => x >= 0 && y >= 0 && x < w && y < h && comp[y * w + x] === c;
+      const [sx, sy] = [first[c]! % w, Math.floor(first[c]! / w)];
+      let [vx, vy, dx, dy] = [sx, sy, 1, 0];
+      const ring: Pt[] = [];
+      do {
+        ring.push([vx, vy]);
+        vx += dx;
+        vy += dy;
+        const [rx, ry] = [-dy, dx];
+        const right = isIn(vx + (dx + rx - 1) / 2, vy + (dy + ry - 1) / 2);
+        const left = isIn(vx + (dx - rx - 1) / 2, vy + (dy - ry - 1) / 2);
+        if (!right) [dx, dy] = [rx, ry];
+        else if (left) [dx, dy] = [-rx, -ry];
+      } while (vx !== sx || vy !== sy || dx !== 1 || dy !== 0);
+      const poly = facet(ring, tol).map(([x, y]) => [x! / this.k, y! / this.k] as Pt);
+      if (poly.length < 3) continue;
+      let area = 0;
+      for (let i = 0; i < poly.length; i++) {
+        const [a, b] = [poly[i]!, poly[(i + 1) % poly.length]!];
+        area += a[0]! * b[1]! - b[0]! * a[1]!;
+      }
+      const s = sum[c]!;
+      out.push({ poly, area: Math.abs(area) / 2, color: `#${s.map((v) => Math.round(v / sizes[c]!).toString(16).padStart(2, "0")).join("")}` });
+    }
+    return out.sort((a, b) => b.area - a.area);
   }
 }
 

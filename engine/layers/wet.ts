@@ -6,9 +6,9 @@
 // so strokes drag, blend and streak. Over dry paint a loaded stroke simply covers, which gives occlusion for free.
 import { type Canvas, createCanvas } from "@napi-rs/canvas";
 import { type Color, rgb, shift } from "../core/color.ts";
-import { boxBlur } from "../core/field.ts";
+import type { Area } from "../core/mask.ts";
 import type { Painting } from "../painting.ts";
-import { type Pt, spline, taper } from "../core/path.ts";
+import { affine, moved, type Placement, type Pt, spline, taper, type Xf } from "../core/path.ts";
 import { ksDec, ksEnc, linToByte, toLin } from "../core/pigment.ts";
 
 export interface WetOpts {
@@ -66,7 +66,22 @@ export const media = {
   pencil: { load: 0.4, pickup: 0, bristle: 0, hardness: 0.7, tooth: 0.8 },
   charcoal: { load: 0.65, pickup: 0.15, bristle: 0.35, hardness: 0.45, tooth: 0.95 },
   pastel: { load: 0.9, pickup: 0.1, bristle: 0.2, hardness: 0.6, tooth: 0.65 },
+  /** Colored pencil: a waxier, softer lead than graphite. Layers of it mix as pigment. */
+  colored: { load: 0.55, pickup: 0, bristle: 0, hardness: 0.45, tooth: 0.62 },
 } satisfies Record<string, Partial<WetStroke>>;
+
+export interface HatchOpts extends WetStroke {
+  /** Direction of the strokes, radians. */
+  angle?: number;
+  /** Distance between neighbouring strokes. Defaults to 0.55 of size. */
+  gap?: number;
+  /** Mean length of one stroke. Defaults to 8 times size. */
+  length?: number;
+  /** Pressure at a point, 0..1. This is how a hatched tone is graded. Strokes under 0.03 are left out. */
+  tone?: (x: number, y: number) => number;
+  /** Softness of the shape's edge, in logical units. */
+  feather?: number;
+}
 
 const BINS = 24;
 const FINE = 256;
@@ -88,6 +103,7 @@ export class WetLayer {
   private life: number;
   private impasto: number;
   private maskA?: Float32Array;
+  private xf?: Xf;
 
   constructor(readonly name: string, private p: Painting, o: WetOpts = {}) {
     this.w = p.pxW;
@@ -157,20 +173,32 @@ export class WetLayer {
     return this;
   }
 
-  /** Run fn with every stroke confined to a polygon, as with masking film. Nested clips intersect. Feather softens the edge, in logical units. */
-  clip(poly: Pt[], fn: () => void, feather = 0): this {
-    const c = createCanvas(this.w, this.h);
-    const g = c.getContext("2d");
-    g.scale(this.p.scale, this.p.scale);
-    g.beginPath();
-    poly.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y)));
-    g.closePath();
-    g.fill();
-    const d = g.getImageData(0, 0, this.w, this.h).data;
-    let m: Float32Array = new Float32Array(this.w * this.h);
-    for (let i = 0; i < m.length; i++) m[i] = d[i * 4 + 3]! / 255;
-    const R = Math.round((feather * this.p.scale) / 2);
-    if (R >= 1) m = boxBlur(boxBlur(m, this.w, this.h, R), this.w, this.h, R);
+  /**
+   * Run fn with everything it paints moved, scaled, turned and mirrored as one group. Brush sizes, hatch spacing and
+   * feathers scale with it and stroke directions turn with it. Groups nest. Masks and `tone` functions stay in sheet coordinates.
+   */
+  at(pl: Placement, fn: () => void): this {
+    const prev = this.xf;
+    this.xf = affine(pl, prev);
+    fn();
+    this.xf = prev;
+    return this;
+  }
+
+  /** Run a method once in sheet coordinates: the group transform is applied to its arguments, then set aside so nothing inside applies it again. */
+  private placed<T>(fn: (xf: Xf) => T): T {
+    const xf = this.xf!;
+    this.xf = undefined;
+    try {
+      return fn(xf);
+    } finally {
+      this.xf = xf;
+    }
+  }
+
+  /** Run fn with every stroke confined to an area, as with masking film. Nested clips intersect. Feather softens the edge, in logical units. */
+  clip(area: Area, fn: () => void, feather = 0): this {
+    const m = Float32Array.from(this.p.mask(moved(area, this.xf), feather * (this.xf?.k ?? 1)).a);
     const prev = this.maskA;
     if (prev) for (let i = 0; i < m.length; i++) m[i] = m[i]! * prev[i]!;
     this.maskA = m;
@@ -181,6 +209,7 @@ export class WetLayer {
 
   /** Lay a shape in with the brush: parallel strokes of uneven length across the polygon, cut to its edge. The inside keeps the marks, the outline stays clean. */
   block(poly: Pt[], o: BlockOpts): this {
+    if (this.xf) return this.placed((T) => this.block(T.pts(poly), { ...o, size: o.size * T.k, angle: T.angle(o.angle ?? 0), feather: (o.feather ?? 0) * T.k }));
     const rng = this.p.rng.fork(`${this.name}/block${this.now}`);
     const xs = poly.map((q) => q[0]);
     const ys = poly.map((q) => q[1]);
@@ -213,12 +242,78 @@ export class WetLayer {
     );
   }
 
+  /** Rub an area back to bare paper, as an eraser does. Whatever is drawn next there starts clean, so a near form can sit in front of a far one. */
+  lift(area: Area, feather = 0): this {
+    this.clip(
+      area,
+      () => {
+        const m = this.maskA!;
+        for (let i = 0; i < m.length; i++) {
+          if (!m[i]) continue;
+          this.wc[i] = this.wc[i]! * (1 - m[i]!);
+          this.dc[i] = this.dc[i]! * (1 - m[i]!);
+        }
+      },
+      feather,
+    );
+    this.cache = undefined;
+    return this;
+  }
+
+  /** Shade a shape with a pencil: parallel strokes of uneven length, each pressed as hard as `tone` says where it lies, cut to the shape's edge. */
+  hatch(poly: Pt[], o: HatchOpts): this {
+    if (this.xf) {
+      return this.placed((T) =>
+        this.hatch(T.pts(poly), { ...o, size: o.size * T.k, angle: T.angle(o.angle ?? -0.9), gap: o.gap && o.gap * T.k, length: o.length && o.length * T.k, feather: (o.feather ?? 0) * T.k }),
+      );
+    }
+    const rng = this.p.rng.fork(`${this.name}/hatch${this.now}`);
+    const xs = poly.map((q) => q[0]);
+    const ys = poly.map((q) => q[1]);
+    const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+    const cx = (x0 + x1) / 2;
+    const cy = (y0 + y1) / 2;
+    const rad = Math.hypot(x1 - x0, y1 - y0) / 2 + o.size;
+    const a = o.angle ?? -0.9;
+    const [tx, ty, nx, ny] = [Math.cos(a), Math.sin(a), -Math.sin(a), Math.cos(a)];
+    const gap = o.gap ?? o.size * 0.55;
+    const length = o.length ?? o.size * 8;
+    const { angle: _a, gap: _g, length: _l, tone, feather, ...stroke } = o;
+    const near = ([x, y]: Pt) => x > x0 - o.size && x < x1 + o.size && y > y0 - o.size && y < y1 + o.size;
+    return this.clip(
+      poly,
+      () => {
+        for (let v = -rad; v <= rad; v += gap) {
+          let u = -rad - rng.float(0, length);
+          while (u < rad) {
+            const len = length * rng.float(0.6, 1.3);
+            const pt = (t: number, off: number): Pt => [cx + tx * (u + len * t) + nx * (v + off), cy + ty * (u + len * t) + ny * (v + off)];
+            // Each stroke sits a little off its row and bows slightly, as a wrist does.
+            const off = rng.gauss(0, gap * 0.25);
+            const bow = rng.gauss(0, len * 0.012);
+            // Tone is read every size and a half along the stroke, so a hatch can leave a hole smaller than one stroke.
+            const n = Math.max(2, Math.ceil(len / (o.size * 1.5)));
+            const pts = Array.from({ length: n + 1 }, (_, i) => pt(i / n, off + bow * Math.sin((Math.PI * i) / n)));
+            u += len * rng.float(0.7, 1);
+            if (!pts.some(near)) continue;
+            const pr = pts.map(([x, y]) => (tone ? Math.min(1, Math.max(0, tone(x, y))) : 1));
+            if (Math.max(...pr) < 0.03) continue;
+            // The hand lands lightly, presses through the middle and lifts off.
+            this.stroke(pts.map(([x, y], i): Pt => [x, y, pr[i]! * (0.62 + 0.38 * Math.sin((Math.PI * i) / n))]), stroke);
+          }
+        }
+      },
+      feather ?? 0,
+    );
+  }
+
   /** A clean brush dragged through the paint. */
   smudge(pts: Pt[], o: { size: number; strength?: number; hardness?: number; bristle?: number; taper?: [number, number] }): this {
     return this.stroke(pts, { ...o, load: 0, pickup: o.strength ?? 0.8 });
   }
 
   stroke(pts: Pt[], o: WetStroke): this {
+    if (this.xf) return this.placed((T) => this.stroke(T.pts(pts), { ...o, size: o.size * T.k }));
     const s = this.p.scale;
     const load = Math.min(0.98, o.load ?? 0.8);
     const pickup = o.pickup ?? 0.5;

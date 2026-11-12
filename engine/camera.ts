@@ -1,11 +1,12 @@
 // A pinhole camera, so things can be placed in space and land on the sheet in correct perspective.
-// World: x right, y up, z away. Screen: logical units, y down.
+// World: right-handed. With the camera looking down -z, x is right, y is up and z comes toward the viewer.
+// A camera placed at -z looking toward +z sees +x on its left. Screen: logical units, y down.
 import type { Pt } from "./core/path.ts";
 
 export type V3 = [number, number, number];
-const sub = (a: V3, b: V3): V3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
-const dot = (a: V3, b: V3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-const cross = (a: V3, b: V3): V3 => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+export const sub = (a: V3, b: V3): V3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+export const dot = (a: V3, b: V3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+export const cross = (a: V3, b: V3): V3 => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 export const norm = (a: V3): V3 => {
   const l = Math.hypot(...a) || 1;
   return [a[0] / l, a[1] / l, a[2] / l];
@@ -16,11 +17,15 @@ export interface Camera {
   project(p: V3): [number, number, number] | undefined;
   /** Distance along the view axis. Sort by this to draw far things first. */
   depth(p: V3): number;
+  /** The line of sight through a point of the sheet: where it starts and the direction it travels (not unit length). */
+  ray(x: number, y: number): { o: V3; d: V3 };
   /** A world-space polyline as stroke points. Points behind the camera are dropped. */
   path(pts: V3[], pressure?: number): Pt[];
 }
 
-export function camera(o: { eye: V3; target: V3; fov?: number; width: number; height: number }): Camera {
+/** `width` and `height` are the size of the view. `left` and `top` set where its corner sits on the sheet, so several views can share one sheet. */
+export function camera(o: { eye: V3; target: V3; fov?: number; width: number; height: number; left?: number; top?: number }): Camera {
+  const [cx, cy] = [(o.left ?? 0) + o.width / 2, (o.top ?? 0) + o.height / 2];
   const f = norm(sub(o.target, o.eye));
   const r = norm(cross(f, [0, 1, 0]));
   const u = cross(r, f);
@@ -29,11 +34,15 @@ export function camera(o: { eye: V3; target: V3; fov?: number; width: number; he
     const d = sub(p, o.eye);
     const z = dot(d, f);
     if (z < 0.01) return undefined;
-    return [o.width / 2 + (dot(d, r) / z) * focal, o.height / 2 - (dot(d, u) / z) * focal, focal / z];
+    return [cx + (dot(d, r) / z) * focal, cy - (dot(d, u) / z) * focal, focal / z];
   };
   return {
     project,
     depth: (p) => dot(sub(p, o.eye), f),
+    ray: (x, y) => {
+      const [a, b] = [x - cx, cy - y];
+      return { o: o.eye, d: [f[0] * focal + r[0] * a + u[0] * b, f[1] * focal + r[1] * a + u[1] * b, f[2] * focal + r[2] * a + u[2] * b] };
+    },
     path: (pts, pressure) => pts.flatMap((p) => { const s = project(p); return s ? [[s[0], s[1], pressure] as Pt] : []; }),
   };
 }

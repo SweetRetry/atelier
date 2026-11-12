@@ -2,9 +2,11 @@
 // This is the layer for vector-like marks, flat shapes, gradients, lettering and whole-layer pixel passes.
 import { type Canvas, createCanvas } from "@napi-rs/canvas";
 import { type BrushEnv, type Ctx, getBrush, type StrokeOpts } from "../brushes/registry.ts";
-import { type Color, rgba } from "../core/color.ts";
+import { type Color, rgb, rgba } from "../core/color.ts";
 import { boxBlur } from "../core/field.ts";
-import { type Pt, ribbon, spline, taper, tracePoly } from "../core/path.ts";
+import { type Area, Mask } from "../core/mask.ts";
+import { affine, moved, type Placement, type Pt, ribbon, spline, taper, tracePoly, type Xf } from "../core/path.ts";
+import { adjust, type Levels } from "../effects.ts";
 import type { Painting } from "../painting.ts";
 
 export class Layer {
@@ -13,6 +15,7 @@ export class Layer {
   blend = "source-over";
   opacity = 1;
   private strokes = 0;
+  private xf?: Xf;
 
   constructor(readonly name: string, private p: Painting) {
     this.canvas = createCanvas(p.pxW, p.pxH);
@@ -20,6 +23,38 @@ export class Layer {
     this.ctx.scale(p.scale, p.scale);
     this.ctx.lineCap = "round";
     this.ctx.lineJoin = "round";
+  }
+
+  /**
+   * Run fn with everything it draws moved, scaled, turned and mirrored as one group. Sizes scale too, so a part drawn
+   * once can be set down at any size. Groups nest. Masks and whole-layer passes (blur, warp, pixels) stay in sheet coordinates.
+   */
+  at(pl: Placement, fn: () => void): this {
+    const prev = this.xf;
+    const own = affine(pl);
+    this.xf = affine(pl, prev);
+    this.ctx.save();
+    this.ctx.transform(...own.m);
+    fn();
+    this.ctx.restore();
+    this.xf = prev;
+    return this;
+  }
+
+  /** Lay the pixels of another layer of any kind onto this one. After that blur, warp, adjust and the rest work on it. Set the source's opacity to 0 if only the copy should show. */
+  copy(src: { canvas: Canvas }, opacity = 1): this {
+    this.ctx.save();
+    this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+    this.ctx.globalAlpha = opacity;
+    this.ctx.drawImage(src.canvas, 0, 0);
+    this.ctx.restore();
+    this.p.tick(2);
+    return this;
+  }
+
+  /** Remap the lightness, chroma and hue of what is on this layer. See `levels`. */
+  adjust(o: Levels): this {
+    return this.pixels((d) => adjust(d, o));
   }
 
   /** Draw one stroke through control points with a named brush. */
@@ -43,14 +78,50 @@ export class Layer {
     return this;
   }
 
-  /** Fill a polygon with flat color. */
-  shape(poly: Pt[], color: Color, alpha = 1): this {
+  /** Fill a polygon with flat color. Given a mask, lay the color through it, so a tone function can shade a form. */
+  shape(poly: Pt[] | Mask, color: Color, alpha = 1): this {
+    if (poly instanceof Mask) {
+      const t = createCanvas(poly.w, poly.h);
+      const g = t.getContext("2d");
+      const img = g.createImageData(poly.w, poly.h);
+      const [r, gr, b] = rgb(color);
+      for (let i = 0; i < poly.a.length; i++) {
+        img.data[i * 4] = r;
+        img.data[i * 4 + 1] = gr;
+        img.data[i * 4 + 2] = b;
+        img.data[i * 4 + 3] = poly.a[i]! * alpha * 255;
+      }
+      g.putImageData(img, 0, 0);
+      // A mask is in sheet coordinates whatever group is being drawn.
+      this.ctx.save();
+      this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+      this.ctx.drawImage(t, 0, 0);
+      this.ctx.restore();
+      this.p.tick(2);
+      return this;
+    }
     this.ctx.fillStyle = rgba(color, alpha);
     this.ctx.beginPath();
     poly.forEach(([x, y], i) => (i ? this.ctx.lineTo(x, y) : this.ctx.moveTo(x, y)));
     this.ctx.closePath();
     this.ctx.fill();
     this.p.tick(2);
+    return this;
+  }
+
+  /** A ruled line of even width through the points, with straight segments and sharp corners. `closed` joins the end to the start, for the outline of a shape. */
+  line(pts: Pt[], color: Color, width = 2, closed = false): this {
+    this.ctx.save();
+    this.ctx.strokeStyle = rgba(color);
+    this.ctx.lineWidth = width;
+    this.ctx.lineJoin = "miter";
+    this.ctx.lineCap = closed ? "butt" : "round";
+    this.ctx.beginPath();
+    pts.forEach(([x, y], i) => (i ? this.ctx.lineTo(x, y) : this.ctx.moveTo(x, y)));
+    if (closed) this.ctx.closePath();
+    this.ctx.stroke();
+    this.ctx.restore();
+    this.p.tick(1);
     return this;
   }
 
@@ -79,8 +150,29 @@ export class Layer {
     return this;
   }
 
-  /** Run fn with drawing confined to a polygon. Strokes made inside are clipped too. */
-  clip(poly: Pt[], fn: () => void): this {
+  /**
+   * Run fn with drawing confined to an area. Strokes made inside are clipped too.
+   * A plain polygon with no feather is cut with a hard edge by Skia. A mask, holes or a feather keep whatever fn did only as far as the mask lets through.
+   */
+  clip(area: Area, fn: () => void, feather = 0): this {
+    if (area instanceof Mask || feather > 0 || typeof area[0]?.[0] !== "number") {
+      const m = this.p.mask(moved(area, this.xf), feather * (this.xf?.k ?? 1)).a;
+      const before = this.ctx.getImageData(0, 0, this.p.pxW, this.p.pxH).data;
+      fn();
+      return this.pixels((d) => {
+        // Blend premultiplied, so a soft edge over nothing does not pick up black.
+        for (let i = 0; i < m.length; i++) {
+          const k = m[i]!;
+          if (k >= 1) continue;
+          const o = i * 4;
+          const [a0, a1] = [before[o + 3]! * (1 - k), d[o + 3]! * k];
+          const a = a0 + a1;
+          for (let c = 0; c < 3; c++) d[o + c] = a > 0 ? (before[o + c]! * a0 + d[o + c]! * a1) / a : 0;
+          d[o + 3] = a;
+        }
+      });
+    }
+    const poly = area as Pt[];
     this.ctx.save();
     this.ctx.beginPath();
     poly.forEach(([x, y], i) => (i ? this.ctx.lineTo(x, y) : this.ctx.moveTo(x, y)));
@@ -91,12 +183,27 @@ export class Layer {
     return this;
   }
 
+  /** Rub an area back to nothing, as an eraser does. What lies on the layers beneath shows through. */
+  erase(area: Area, feather = 0): this {
+    const m = this.p.mask(moved(area, this.xf), feather * (this.xf?.k ?? 1)).a;
+    return this.pixels((d) => {
+      for (let i = 0; i < m.length; i++) if (m[i]) d[i * 4 + 3] = d[i * 4 + 3]! * (1 - m[i]!);
+    });
+  }
+
   /** Vertical gradient over the whole layer (or the current clip), evenly spaced stops from y0 to y1. */
   vgrad(stops: Color[], y0 = 0, y1 = this.p.height): this {
-    const g = this.ctx.createLinearGradient(0, y0, 0, y1);
+    return this.grad(stops, [0, y0], [0, y1]);
+  }
+
+  /** Gradient over the whole layer (or the current clip). Stops are evenly spaced. Straight from `from` to `to`, or round when a radius is given: centred on `from`, from radius `r0` out to `r`. */
+  grad(stops: Color[], from: [number, number], to: [number, number] | number, r0 = 0): this {
+    const g = typeof to === "number" ? this.ctx.createRadialGradient(from[0], from[1], r0, from[0], from[1], to) : this.ctx.createLinearGradient(from[0], from[1], to[0], to[1]);
     stops.forEach((c, i) => g.addColorStop(i / (stops.length - 1), rgba(c)));
     this.ctx.fillStyle = g;
-    this.ctx.fillRect(0, 0, this.p.width, this.p.height);
+    // Inside a group the sheet is no longer the rectangle from 0, 0, so cover far more than it.
+    if (this.xf) this.ctx.fillRect(-1e5, -1e5, 2e5, 2e5);
+    else this.ctx.fillRect(0, 0, this.p.width, this.p.height);
     this.p.tick(4);
     return this;
   }

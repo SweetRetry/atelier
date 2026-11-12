@@ -5,8 +5,9 @@
 // The grid is fixed in logical units, so a preview and a full render run the same simulation.
 import { type Canvas, createCanvas } from "@napi-rs/canvas";
 import { type Color, rgb } from "../core/color.ts";
+import type { Area, Mask } from "../core/mask.ts";
 import type { Painting } from "../painting.ts";
-import { type Pt, spline, taper } from "../core/path.ts";
+import { affine, moved, type Placement, type Pt, spline, taper, type Xf } from "../core/path.ts";
 import { ksDec, ksEnc, linToByte, toLin } from "../core/pigment.ts";
 import { makeNoise } from "../core/rng.ts";
 
@@ -55,6 +56,21 @@ export class WaterLayer {
   private gran: number;
   private evap: number;
   private noise: ReturnType<typeof makeNoise>;
+  /** Masking fluid, per cell for the simulation and per device pixel for the edge. */
+  private resist?: Float32Array;
+  private resistPx?: Float32Array;
+  /** Confinement of the brush while inside clip(), per cell. */
+  private stencil?: Float32Array;
+  private xf?: Xf;
+
+  /** Run fn with everything it paints moved, scaled, turned and mirrored as one group. Brush sizes scale with it. Groups nest. Masks stay in sheet coordinates. */
+  at(pl: Placement, fn: () => void): this {
+    const prev = this.xf;
+    this.xf = affine(pl, prev);
+    fn();
+    this.xf = prev;
+    return this;
+  }
 
   constructor(readonly name: string, private p: Painting, o: WaterOpts = {}) {
     this.cell = o.cell ?? 3;
@@ -83,19 +99,78 @@ export class WaterLayer {
     }
   }
 
+  /** A mask brought down to the simulation grid: the mean of the mask over each cell. */
+  private cells(m: Mask): Float32Array {
+    const { gw, gh } = this;
+    const out = new Float32Array(gw * gh);
+    const k = this.cell * this.p.scale;
+    for (let y = 0; y < gh; y++) {
+      for (let x = 0; x < gw; x++) {
+        const [x0, x1] = [Math.min(m.w - 1, Math.floor(x * k)), Math.min(m.w, Math.max(Math.floor(x * k) + 1, Math.ceil((x + 1) * k)))];
+        const [y0, y1] = [Math.min(m.h - 1, Math.floor(y * k)), Math.min(m.h, Math.max(Math.floor(y * k) + 1, Math.ceil((y + 1) * k)))];
+        let sum = 0;
+        for (let py = y0; py < y1; py++) for (let px = x0; px < x1; px++) sum += m.a[py * m.w + px]!;
+        out[y * gw + x] = sum / Math.max(1, (x1 - x0) * (y1 - y0));
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Masking fluid. The area takes no water and no pigment on this layer from now on, so the paper stays white there
+   * however wet the wash around it. Its edge is kept at full resolution, sharper than the simulation grid.
+   * To paint into a reserved area later, glaze on another watercolor layer.
+   */
+  reserve(area: Area, feather = 0): this {
+    const m = this.p.mask(moved(area, this.xf), feather * (this.xf?.k ?? 1));
+    const c = this.cells(m);
+    const [r, px] = [this.resist ?? (this.resist = new Float32Array(c.length)), this.resistPx ?? (this.resistPx = new Float32Array(m.a.length))];
+    for (let i = 0; i < c.length; i++) r[i] = Math.max(r[i]!, c[i]!);
+    for (let i = 0; i < px.length; i++) px[i] = Math.max(px[i]!, m.a[i]!);
+    this.cache = undefined;
+    return this;
+  }
+
+  /** Run fn with the brush confined to an area. Water laid inside may still creep out as it flows. Nested clips intersect. */
+  clip(area: Area, fn: () => void, feather = 0): this {
+    const m = this.cells(this.p.mask(moved(area, this.xf), feather * (this.xf?.k ?? 1)));
+    const prev = this.stencil;
+    if (prev) for (let i = 0; i < m.length; i++) m[i] = m[i]! * prev[i]!;
+    this.stencil = m;
+    fn();
+    this.stencil = prev;
+    return this;
+  }
+
+  /** Lift settled pigment out of an area with a damp brush or a tissue. `amount` 1 takes it back to paper. The edge is soft, as lifting is. */
+  lift(area: Area, amount = 1, feather = 0): this {
+    const m = this.cells(this.p.mask(moved(area, this.xf), feather * (this.xf?.k ?? 1)));
+    for (let i = 0; i < m.length; i++) {
+      if (!m[i]) continue;
+      const k = 1 - amount * m[i]!;
+      for (let c = 0; c < 3; c++) {
+        this.D[c]![i] = this.D[c]![i]! * k;
+        this.S[c]![i] = this.S[c]![i]! * k;
+      }
+    }
+    this.cache = undefined;
+    return this;
+  }
+
   /** Clean water, to pre-wet paper or to push a bloom into a damp wash. */
   wetArea(pts: Pt[], o: { size: number; water?: number; hardness?: number }): this {
     return this.stroke(pts, { ...o, pigment: 0 });
   }
 
   stroke(pts: Pt[], o: WaterStroke): this {
+    if (this.xf) [pts, o] = [this.xf.pts(pts), { ...o, size: o.size * this.xf.k }];
     const water = o.water ?? 0.7;
     const pig = o.pigment ?? 0.6;
     const hard = Math.min(0.97, o.hardness ?? 0.9);
     const path = spline(pts, Math.max(this.cell * 0.5, o.size * 0.15));
     if (o.taper) taper(path, o.taper[0], o.taper[1]);
     const c = rgb(o.color ?? "#000").map((v) => ksEnc(toLin(v / 255)) * pig * 0.09);
-    const { gw, gh, W, S, box } = this;
+    const { gw, gh, W, S, box, resist, stencil } = this;
     const rag = (o.ragged ?? 0.5) * 0.34;
     for (const sm of path) {
       const R = Math.max(0.6, ((o.size / 2) * (0.5 + 0.5 * sm.p)) / this.cell);
@@ -110,8 +185,11 @@ export class WaterLayer {
           // The footprint wobbles with a fixed pattern in the paper, so successive dabs agree on one ragged outline.
           const rr = Math.hypot(x + 0.5 - cx, y + 0.5 - cy) / (R * (1 + rag * (this.noise(x / 7, y / 7) + 0.5 * this.noise(x / 2.3 + 30, y / 2.3))));
           if (rr >= 1) continue;
-          const fall = rr < hard ? 1 : 1 - (rr - hard) / (1 - hard);
+          let fall = rr < hard ? 1 : 1 - (rr - hard) / (1 - hard);
           const i = y * gw + x;
+          if (resist) fall *= 1 - resist[i]!;
+          if (stencil) fall *= stencil[i]!;
+          if (fall <= 0) continue;
           W[i] = Math.min(1.6, Math.max(W[i]!, water * fall) + water * fall * 0.06);
           const m = Math.min(1, fall * 3) * sm.p;
           S[0]![i] = S[0]![i]! + c[0]! * m;
@@ -130,7 +208,7 @@ export class WaterLayer {
 
   /** Run the simulation. Call with a large number to let a passage spread before the next stroke. */
   flow(steps: number): this {
-    const { gw, gh, W, S, D, dW, dS, absorb, valley, box } = this;
+    const { gw, gh, W, S, D, dW, dS, absorb, valley, box, resist } = this;
     const evap = 0.0035 * this.evap;
     for (let n = 0; n < steps; n++) {
       if (box[0]! > box[2]!) break;
@@ -148,6 +226,8 @@ export class WaterLayer {
             const b = dir === 0 ? a + 1 : a + gw;
             const wb = W[b]!;
             if (wa < EPS && wb < EPS) continue;
+            // Masking fluid is a wall. Nothing crosses into a cell it covers.
+            if (resist && (resist[a]! > 0.5 || resist[b]! > 0.5)) continue;
             let f: number; // water moving from a to b
             if (wa >= EPS && wb >= EPS) {
               f = 0.22 * (wa - wb);
@@ -259,6 +339,7 @@ export class WaterLayer {
     const img = g.createImageData(w, h);
     const d = img.data;
     const tooth = this.gran > 0 ? this.p.tooth : undefined;
+    const keep = this.resistPx;
     const k = 1 / (this.cell * this.p.scale);
     for (let y = 0; y < h; y++) {
       const gy = Math.min(gh - 1.001, Math.max(0, (y + 0.5) * k - 0.5));
@@ -271,7 +352,7 @@ export class WaterLayer {
         const i00 = yi * gw + xi;
         const o = (y * w + x) * 4;
         // Fine grain: a little more pigment in the valleys of the paper, at full pixel resolution.
-        const grain = tooth ? 1 + this.gran * 0.9 * (0.5 - tooth[y * w + x]!) : 1;
+        const grain = (tooth ? 1 + this.gran * 0.9 * (0.5 - tooth[y * w + x]!) : 1) * (keep ? 1 - keep[y * w + x]! : 1);
         for (let ch = 0; ch < 3; ch++) {
           const Sc = S[ch]!;
           const Dc = D[ch]!;

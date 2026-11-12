@@ -5,7 +5,7 @@ description: Paint a picture with the atelier engine. Use when asked to paint, d
 
 Atelier lives at `/Users/zhangzimin/Documents/sweetRetry/projects/atelier`. Run every command from there.
 
-Before writing, read `README.md` (the engine API) and the finished work nearest to your medium. `works/003-new-friend.ts` is the bar for a character. `works/001-someone-is-awake.ts` is the bar for a landscape. `METHOD.md` holds the principles and the checklist for changing the engine.
+Before writing, read `README.md` (the engine API) and the finished work nearest to your medium. `works/004-new-friend.ts` is the bar for a character. `works/001-someone-is-awake.ts` is the bar for a landscape. `METHOD.md` holds the principles and the checklist for changing the engine.
 
 A painting is built from large to small. Each step below ends on a render you look at. Move on only when its criterion holds.
 
@@ -44,8 +44,12 @@ If a flaw's cause is a mark the engine cannot make, follow the engine-change che
 
 ## Craft notes
 
-- **Faces and animals.** Choose a frontal or pure profile pose. Eyes carry the picture, so give them a dark rim, an iris gradient and one highlight from the declared light.
-- **Soft edges.** Fur and hair edges are a soft down dab plus a few fine hairs. See `fringe` in `works/003-new-friend.ts`.
+- **Faces and figures.** Build the head with `head()` and the body with `figure()`, put them in a `scene`, and draw over them. Any turn of the head is available. Type features in face coordinates and place them with `head.on(u, v)`. Skip a feature when `scene.sees` says it is hidden. Eyes carry the picture, so give them a dark rim, an iris gradient and one highlight from the declared light.
+- **Soft edges.** Fur and hair edges are a soft down dab plus a few fine hairs. See `fringe` in `works/004-new-friend.ts`.
 - **Glow and shadow.** A soft shadow is `silhouette` then `blur`. A light source needs dark around it to read as light.
 - **Unfamiliar subject.** Paint the hard part alone in a scratch work first, then bring it into the picture.
+- **Measure before judging.** `bun measure <work>` prints where each layer sits, the value grid and where the strongest edges are. Use it to check that the focal point is among the `pull` cells and that parts are where you meant them.
+- **Parts.** Draw each part in its own coordinates inside `layer.at({ x, y, s, rot }, fn)`. Sizes scale with it. Fix proportion by changing the placement.
+- **Values.** When `bun measure` shows the range is too narrow or sits in the wrong place, fix the palette first. Use `adjust` or `levels` for the last few points.
+- **From a reference.** `bun measure <work> --ref refs/<name> --at "x,y;..."` on each landmark prints how far off the render has it.
 - **Randomness.** Take it from `p.rng.fork("name")`, and confine scattered things with `inPoly` or `clip` to the region they belong to.

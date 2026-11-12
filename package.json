@@ -9,7 +9,8 @@
     "sheet": "bun engine/tools/sheet.ts",
     "record": "bun engine/tools/record.ts",
     "compare": "bun engine/tools/compare.ts",
-    "drill": "bun engine/tools/drill.ts"
+    "drill": "bun engine/tools/drill.ts",
+    "measure": "bun engine/tools/measure.ts"
   },
   "dependencies": {
     "@napi-rs/canvas": "^1.1.0",
